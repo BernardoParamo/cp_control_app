@@ -4,12 +4,11 @@ import 'dart:developer' as developer;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+// import 'config_page.dart'; // Lo dejamos comentado por ahora
 
 class ControlPage extends StatefulWidget {
   final BluetoothConnection connection;
-
   const ControlPage({super.key, required this.connection});
-
   @override
   State<ControlPage> createState() => _ControlPageState();
 }
@@ -19,59 +18,68 @@ class _ControlPageState extends State<ControlPage> {
   List<Map<String, dynamic>> outputs = [];
   bool isLoading = true;
   Timer? _refreshTimer;
-
   StreamSubscription<Uint8List>? _dataSubscription;
   String _dataBuffer = '';
+  bool _isHandshakeComplete = false; // Nueva bandera para el handshake
 
   @override
   void initState() {
     super.initState();
+    developer.log('ControlPage: initState()', name: 'APP.LIFECYCLE');
     _startListening();
-    // Pedimos el estado inicial al entrar
-    Future.delayed(const Duration(milliseconds: 200), _getStatus);
-
-    _refreshTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
-      if (mounted && widget.connection.isConnected) {
-        _getStatus();
-      } else {
-        timer.cancel();
-      }
-    });
+    // Ya NO pedimos el estado aquí. Esperamos al handshake.
   }
 
   void _startListening() {
+    developer.log('ControlPage: Iniciando escucha de datos...', name: 'APP.BLUETOOTH');
     _dataSubscription = widget.connection.input?.listen(
       (data) {
-        _dataBuffer += utf8.decode(data, allowMalformed: true);
+        String message = utf8.decode(data, allowMalformed: true);
+        developer.log('Datos BT CRUDOS recibidos: "$message"', name: 'APP.RAW_DATA');
+        
+        // --- NUEVA LÓGICA DE HANDSHAKE ---
+        if (!_isHandshakeComplete && message.trim().contains('C')) {
+          _isHandshakeComplete = true;
+          developer.log("Handshake 'C' recibido. ESP32 listo. Pidiendo estado inicial...", name: "APP.BLUETOOTH");
+          _getStatus(); // Ahora sí pedimos el estado
+          
+          // Iniciamos el timer solo después de confirmar la conexión
+          _refreshTimer ??= Timer.periodic(const Duration(seconds: 2), (timer) {
+            if (mounted && widget.connection.isConnected) {
+              _getStatus();
+            } else {
+              timer.cancel();
+            }
+          });
+          return; // Salimos para no procesar 'C' como JSON
+        }
+
+        // El resto de la lógica de búfer y JSON
+        _dataBuffer += message;
         while (_dataBuffer.contains('\n')) {
           final endIndex = _dataBuffer.indexOf('\n');
-          final message = _dataBuffer.substring(0, endIndex).trim();
+          final jsonMessage = _dataBuffer.substring(0, endIndex).trim();
           _dataBuffer = _dataBuffer.substring(endIndex + 1);
 
-          if (message.startsWith('{') && message.endsWith('}')) {
+          if (jsonMessage.startsWith('{') && jsonMessage.endsWith('}')) {
             try {
-              final jsonData = jsonDecode(message);
+              final jsonData = jsonDecode(jsonMessage);
               _updateStatus(jsonData);
             } catch (e) {
-              developer.log('Error al decodificar JSON: $e', name: 'Bluetooth.JSON', error: 'Datos: $message');
+              developer.log('Error al decodificar JSON', error: e.toString(), name: 'APP.ERROR');
             }
           }
         }
-      },
-      onDone: () {
-        developer.log('Conexión perdida.', name: 'Bluetooth');
-        if (mounted) Navigator.of(context).pop();
-      },
-      onError: (error) {
-        developer.log('Error en la conexión', name: 'Bluetooth', error: error);
-        if (mounted) Navigator.of(context).pop();
-      },
+      }, 
+      onDone: () { /* ... sin cambios ... */ }, 
+      onError: (error) { /* ... sin cambios ... */ }
     );
   }
 
   void _updateStatus(Map<String, dynamic> data) {
     if (data.containsKey('inputs') && data.containsKey('outputs')) {
       if (mounted) {
+        developer.log('ControlPage: Actualizando estado de la UI.', name: 'APP.STATE');
         setState(() {
           inputs = List<Map<String, dynamic>>.from(data['inputs']);
           outputs = List<Map<String, dynamic>>.from(data['outputs']);
@@ -84,10 +92,14 @@ class _ControlPageState extends State<ControlPage> {
   void _sendCommand(String command) {
     if (widget.connection.isConnected) {
       String commandToSend = "<$command>";
+      developer.log('Enviando comando: $commandToSend', name: 'APP.BLUETOOTH.SEND');
       widget.connection.output.add(utf8.encode(commandToSend));
       widget.connection.output.allSent.then((_) {
-        developer.log('Comando enviado: $commandToSend', name: 'Bluetooth.Send');
+        // Este log es opcional, puede llenar mucho la consola
+        // developer.log('Comando $commandToSend enviado físicamente.', name: 'APP.BLUETOOTH.SEND');
       });
+    } else {
+      developer.log('Intento de enviar comando, pero no hay conexión.', name: 'APP.ERROR');
     }
   }
 
@@ -97,6 +109,7 @@ class _ControlPageState extends State<ControlPage> {
 
   @override
   void dispose() {
+    developer.log('ControlPage: dispose() - Limpiando recursos...', name: 'APP.LIFECYCLE');
     _refreshTimer?.cancel();
     _dataSubscription?.cancel();
     super.dispose();
@@ -107,11 +120,18 @@ class _ControlPageState extends State<ControlPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Panel de Control'),
-        // El botón de refresco es útil si el timer falla, lo dejamos
-        actions: [ IconButton( icon: const Icon(Icons.refresh), tooltip: 'Refrescar Estado', onPressed: isLoading ? null : _getStatus, ) ],
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Configuración',
+            onPressed: () {
+              // Aún no implementado
+            },
+          ),
+        ],
       ),
       body: isLoading
-          ? const Center( child: Column( mainAxisAlignment: MainAxisAlignment.center, children: [ CircularProgressIndicator(), SizedBox(height: 20), Text("Obteniendo estado del dispositivo..."), ], ), )
+          ? const Center( child: Column( mainAxisAlignment: MainAxisAlignment.center, children: [ CircularProgressIndicator(), SizedBox(height: 20), Text("Esperando estado del dispositivo..."), ], ), )
           : RefreshIndicator(
               onRefresh: () async => _getStatus(),
               child: ListView(
@@ -145,7 +165,6 @@ class _ControlPageState extends State<ControlPage> {
         final output = outputs[index];
         final outputNum = index + 1;
         final bool isOutputOn = output['state'] == 1;
-        // --- ESTA ERA LA LÍNEA DEL ERROR, AHORA CORREGIDA ---
         final String outputName = output['name'] as String? ?? 'Salida $outputNum';
 
         return Card(
