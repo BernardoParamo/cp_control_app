@@ -4,7 +4,7 @@ import 'dart:developer' as developer;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
-// import 'config_page.dart'; // Mantener comentado hasta que creemos esa pantalla
+import 'config_page.dart'; 
 
 class ControlPage extends StatefulWidget {
   final BluetoothConnection connection;
@@ -100,24 +100,44 @@ class _ControlPageState extends State<ControlPage> {
      _sendCommand('get_status_json');
   }
 
-  @override
+     @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Panel de Control'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refrescar Estado',
-            onPressed: isLoading ? null : _getStatus,
-          ),
+          // El botón de refresh manual ha sido eliminado.
+          
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Configuración',
-            onPressed: () {
-              // Lógica para navegar a la página de configuración
-              // (La implementaremos en el siguiente paso)
+            // --- INICIO DE LA CORRECCIÓN ---
+            // El método se convierte en 'async' para poder usar 'await'
+            onPressed: () async {
+              developer.log("Pausando la escucha de datos en ControlPage.", name: "APP.NAVIGATION");
+              // Pausamos la escucha de datos antes de navegar a la otra pantalla.
+              _dataSubscription?.pause();
+              
+              // Usamos 'await' para que el código se detenga aquí hasta que
+              // la pantalla de ConfigPage se cierre (cuando el usuario le da a "atrás").
+              await Navigator.of(context).push(
+                MaterialPageRoute(builder: (context) => ConfigPage(
+                  connection: widget.connection,
+                  // Le pasamos la suscripción para que la otra pantalla pueda usarla.
+                  dataSubscription: _dataSubscription,
+                )),
+              );
+
+              // Este código solo se ejecutará CUANDO se haya vuelto de ConfigPage.
+              developer.log("Reanudando la escucha de datos en ControlPage.", name: "APP.NAVIGATION");
+              // Volvemos a configurar el 'onData' para que apunte a la función correcta de esta página.
+              _startListening();
+              // Reanudamos la escucha.
+              _dataSubscription?.resume();
+              // Y pedimos el estado por si algo ha cambiado en la configuración.
+              _getStatus();
             },
+            // --- FIN DE LA CORRECCIÓN ---
           ),
         ],
       ),
