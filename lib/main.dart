@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'home_page.dart'; // Importamos nuestro archivo de la pantalla principal
+import 'welcome_page.dart'; // <-- CAMBIO: Importamos la nueva pantalla
 
 void main() {
   runApp(const MyApp());
@@ -11,20 +11,18 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      // Esto quita la cinta roja de "DEBUG" de la esquina.
       debugShowCheckedModeBanner: false,
       title: 'Control ESP32',
       theme: ThemeData(
-        // Definimos el estilo de la barra superior para toda la app
         appBarTheme: AppBarTheme(
-          backgroundColor: Colors.blue[700], // Un azul oscuro
-          foregroundColor: Colors.white, // Color para el título y los iconos
+          backgroundColor: const Color.fromRGBO(9, 114, 61, 1),
+          foregroundColor: Colors.white,
         ),
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color.fromRGBO(139, 193, 64, 1)),
         useMaterial3: true,
       ),
-      // Nos aseguramos de que la pantalla de inicio sea nuestra HomePage
-      home: const HomePage(),
+      // --- CAMBIO: La app ahora empieza en la WelcomePage ---
+      home: const WelcomePage(),
     );
   }
 }
