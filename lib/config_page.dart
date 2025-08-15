@@ -92,12 +92,9 @@ class _ConfigPageState extends State<ConfigPage> {
     }
   }
 
-    void _initializeControllers() {
-    // Limpiamos los controladores antiguos para evitar errores
+  void _initializeControllers() {
     _controllers.forEach((key, controller) => controller.dispose());
     _controllers.clear();
-
-    // Rellenamos los controladores con los datos recibidos del ESP32
     _configData.forEach((key, value) {
       if (value is String) {
         _controllers[key] = TextEditingController(text: value);
@@ -105,9 +102,6 @@ class _ConfigPageState extends State<ConfigPage> {
         _controllers[key] = TextEditingController(text: value.toString());
       }
     });
-
-    // --- INICIO DE LA CORRECCIÓN ---
-    // Bucle para inicializar controladores de listas (nombres y tiempos)
     List<String> listKeys = ['inputNames', 'outputNames', 'pulseTimes'];
     for (var key in listKeys) {
       if (_configData.containsKey(key) && _configData[key] is List) {
@@ -116,42 +110,85 @@ class _ConfigPageState extends State<ConfigPage> {
         }
       }
     }
-
-    // Bucle para inicializar los controladores de los comandos seriales
-    List<String> serialCmdKeys = [
-      'serial_cmd_status', 
-      'serial_cmd_turn_on', 
-      'serial_cmd_turn_off', 
-      'serial_cmd_pulse', 
-      'serial_cmd_help'
-    ];
-    for (var key in serialCmdKeys) {
-        if (_configData.containsKey(key)) {
-            _controllers[key] = TextEditingController(text: _configData[key]);
-        }
-    }
-    // --- FIN DE LA CORRECCIÓN ---
   }
 
-  void _saveConfig() {
-    developer.log("Guardando configuración...", name: "APP.COMMAND");
-    _controllers.forEach((key, controller) {
-      if (controller.text.isNotEmpty) {
-        _sendCommand('set_$key ${controller.text}');
-      }
-    });
-    _sendCommand('set_bt_enabled ${_btEnabled ? "1" : "0"}');
-    _sendCommand('set_serial_enabled ${_serialEnabled ? "1" : "0"}');
-    _sendCommand('save_config');
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Configuración enviada.'), backgroundColor: Colors.green),
+  void _confirmAndSaveConfig() {
+    FocusScope.of(context).unfocus();
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text("Confirmar Cambios"),
+          content: const SingleChildScrollView(
+            child: ListBody(
+              children: <Widget>[
+                Text("Se enviará la nueva configuración al dispositivo."),
+                SizedBox(height: 10),
+                Text("El dispositivo se reiniciará y la conexión se perderá."),
+                SizedBox(height: 10),
+                Text("¿Desea continuar?"),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancelar'),
+              onPressed: () { Navigator.of(context).pop(); },
+            ),
+            ElevatedButton(
+              child: const Text('Guardar y Reiniciar'),
+              onPressed: () {
+                _executeSave();
+                Navigator.of(context).pop();
+                Future.delayed(const Duration(milliseconds: 500), () {
+                  if (mounted) { Navigator.of(context).pop(); }
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Dispositivo reiniciando. Por favor, vuelva a conectar.'),
+                    duration: Duration(seconds: 4),
+                  ),
+                );
+              },
+            ),
+          ],
+        );
+      },
     );
+  }
+
+  void _executeSave() {
+    developer.log("Construyendo JSON de configuración para enviar...", name: "APP.COMMAND");
+    
+    Map<String, dynamic> configToSend = {
+      'ip': _controllers['ip']?.text ?? "",
+      'subnet': _controllers['subnet']?.text ?? "",
+      'gateway': _controllers['gateway']?.text ?? "",
+      'wifi_ssid': _controllers['wifi_ssid']?.text ?? "",
+      'wifi_password': _controllers['wifi_password']?.text ?? "",
+      'bt_device_name': _controllers['bt_device_name']?.text ?? "",
+      'bt_enabled': _btEnabled,
+      'serial_enabled': _serialEnabled,
+      'serial_baud_rate': int.tryParse(_controllers['serial_baud_rate']?.text ?? '0'),
+      'globalPulseTime': int.tryParse(_controllers['globalPulseTime']?.text ?? '0'),
+      'inputNames': List.generate(8, (i) => _controllers['inputNames_$i']?.text ?? ""),
+      'outputNames': List.generate(4, (i) => _controllers['outputNames_$i']?.text ?? ""),
+      'pulseTimes': List.generate(4, (i) => int.tryParse(_controllers['pulseTimes_$i']?.text ?? '0')),
+      'serial_cmd_status': _controllers['serial_cmd_status']?.text,
+      'serial_cmd_turn_on': _controllers['serial_cmd_turn_on']?.text,
+      'serial_cmd_turn_off': _controllers['serial_cmd_turn_off']?.text,
+      'serial_cmd_pulse': _controllers['serial_cmd_pulse']?.text,
+      'serial_cmd_help': _controllers['serial_cmd_help']?.text,
+    };
+
+    String jsonString = jsonEncode(configToSend);
+    _sendCommand('set_config $jsonString');
+    _sendCommand('save_and_reboot');
   }
 
   void _scanWifi() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Buscando redes WiFi...')),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Buscando redes WiFi...')));
     _sendCommand('scan_wifi');
   }
 
@@ -212,7 +249,7 @@ class _ConfigPageState extends State<ConfigPage> {
                 ],
               ),
         floatingActionButton: FloatingActionButton.extended(
-          onPressed: _saveConfig,
+          onPressed: _confirmAndSaveConfig,
           icon: const Icon(Icons.save),
           label: const Text("Guardar Cambios"),
         ),
