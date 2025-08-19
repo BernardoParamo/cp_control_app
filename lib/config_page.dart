@@ -1,28 +1,26 @@
+// lib/config_page.dart
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'bluetooth_service.dart';
 
 class ConfigPage extends StatefulWidget {
-  final BluetoothConnection connection;
-  final StreamSubscription<Uint8List>? dataSubscription;
-
-  const ConfigPage({
-    super.key,
-    required this.connection,
-    required this.dataSubscription,
-  });
+  const ConfigPage({super.key});
 
   @override
   State<ConfigPage> createState() => _ConfigPageState();
 }
 
 class _ConfigPageState extends State<ConfigPage> {
+  final BluetoothService _bluetoothService = BluetoothService.instance;
+  late StreamSubscription<String> _dataSubscription;
+  late StreamSubscription<bool> _connectionSubscription;
+
   bool _isLoading = true;
+  bool _isScanning = false;
   Map<String, dynamic> _configData = {};
-  String _dataBuffer = '';
   final Map<String, TextEditingController> _controllers = {};
   bool _btEnabled = true;
   bool _serialEnabled = true;
@@ -31,50 +29,71 @@ class _ConfigPageState extends State<ConfigPage> {
   @override
   void initState() {
     super.initState();
-    _reconfigureAndResumeSubscription();
+    _startListening();
     _requestConfig();
   }
 
   @override
   void dispose() {
-    widget.dataSubscription?.pause();
+    _dataSubscription.cancel();
+    _connectionSubscription.cancel();
     _controllers.forEach((key, controller) => controller.dispose());
     super.dispose();
   }
 
   void _sendCommand(String command) {
-    if (widget.connection.isConnected) {
-      widget.connection.output.add(utf8.encode("<$command>"));
-      widget.connection.output.allSent;
-      developer.log("Enviado comando: $command", name: "APP.COMMAND");
-    }
+    _bluetoothService.sendCommand(command);
   }
 
-  void _reconfigureAndResumeSubscription() {
-    widget.dataSubscription?.onData((data) {
-      _dataBuffer += utf8.decode(data, allowMalformed: true);
-      while (_dataBuffer.contains('\n')) {
-        final endIndex = _dataBuffer.indexOf('\n');
-        final message = _dataBuffer.substring(0, endIndex).trim();
-        _dataBuffer = _dataBuffer.substring(endIndex + 1);
-        if (message.startsWith('{') && message.endsWith('}')) {
-          try {
-            final jsonData = jsonDecode(message);
-            if (jsonData['type'] == 'config') {
+  void _startListening() {
+    _dataSubscription = _bluetoothService.dataStream.listen((message) {
+      if (mounted && message.startsWith('{') && message.endsWith('}')) {
+        try {
+          final jsonData = jsonDecode(message);
+          switch (jsonData['type']) {
+            case 'config':
               _updateConfigUI(jsonData);
-            } else if (jsonData['type'] == 'wifi_scan') {
+              break;
+            case 'wifi_scan_result':
+              setState(() { _isScanning = false; });
+              if (mounted) Navigator.of(context).pop();
               List<String> networks = List<String>.from(jsonData['networks']);
               _showWifiNetworksDialog(networks);
-            }
-          } catch (e) {
-            developer.log('Error al decodificar JSON: $e', name: 'Bluetooth.JSON');
+              break;
+            case 'wifi_test_result':
+              if (mounted) Navigator.of(context).pop();
+              _showTestResultSnackbar(jsonData);
+              break;
+            // --- NUEVO CASO PARA LA CONFIRMACIÓN ---
+            case 'set_config_result':
+              if (jsonData['success'] == true) {
+                // Si la configuración se recibió bien, ahora sí reiniciamos.
+                _bluetoothService.sendRebootCommand();
+              } else {
+                // Si hubo un error, se lo mostramos al usuario.
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Error: El dispositivo no pudo procesar la configuración.'), backgroundColor: Colors.red),
+                );
+              }
+              break;
           }
+        } catch (e) {
+          developer.log('Error al decodificar JSON: $e', name: 'Bluetooth.JSON');
         }
       }
     });
-    widget.dataSubscription?.resume();
+
+    _connectionSubscription = _bluetoothService.connectionStatusStream.listen((isConnected) {
+      if (!isConnected && mounted) {
+        if (!_isScanning) {
+          developer.log("ConfigPage: Desconexión detectada, volviendo al inicio.", name: "APP.NAVIGATION");
+          Navigator.of(context).popUntil((route) => route.isFirst);
+        }
+      }
+    });
   }
 
+  // ... (las funciones _requestConfig, _updateConfigUI, _initializeControllers no cambian) ...
   void _requestConfig() {
     setState(() { _isLoading = true; });
     _sendCommand('get_config');
@@ -91,27 +110,23 @@ class _ConfigPageState extends State<ConfigPage> {
       });
     }
   }
-
+  
   void _initializeControllers() {
     _controllers.forEach((key, controller) => controller.dispose());
     _controllers.clear();
     _configData.forEach((key, value) {
-      if (value is String) {
-        _controllers[key] = TextEditingController(text: value);
-      } else if (value is num) {
-        _controllers[key] = TextEditingController(text: value.toString());
-      }
+      if (value is String) _controllers[key] = TextEditingController(text: value);
+      else if (value is num) _controllers[key] = TextEditingController(text: value.toString());
     });
-    List<String> listKeys = ['inputNames', 'outputNames', 'pulseTimes'];
-    for (var key in listKeys) {
+    ['inputNames', 'outputNames', 'pulseTimes'].forEach((key) {
       if (_configData.containsKey(key) && _configData[key] is List) {
         for (int i = 0; i < (_configData[key] as List).length; i++) {
           _controllers['${key}_$i'] = TextEditingController(text: _configData[key][i].toString());
         }
       }
-    }
+    });
   }
-
+  
   void _confirmAndSaveConfig() {
     FocusScope.of(context).unfocus();
     showDialog(
@@ -120,36 +135,17 @@ class _ConfigPageState extends State<ConfigPage> {
       builder: (BuildContext context) {
         return AlertDialog(
           title: const Text("Confirmar Cambios"),
-          content: const SingleChildScrollView(
-            child: ListBody(
-              children: <Widget>[
-                Text("Se enviará la nueva configuración al dispositivo."),
-                SizedBox(height: 10),
-                Text("El dispositivo se reiniciará y la conexión se perderá."),
-                SizedBox(height: 10),
-                Text("¿Desea continuar?"),
-              ],
-            ),
-          ),
+          content: const Text("El dispositivo guardará la configuración y se reiniciará. Deberá volver a conectarse manualmente.\n\n¿Desea continuar?"),
           actions: <Widget>[
             TextButton(
               child: const Text('Cancelar'),
-              onPressed: () { Navigator.of(context).pop(); },
+              onPressed: () => Navigator.of(context).pop(),
             ),
             ElevatedButton(
               child: const Text('Guardar y Reiniciar'),
               onPressed: () {
-                _executeSave();
                 Navigator.of(context).pop();
-                Future.delayed(const Duration(milliseconds: 500), () {
-                  if (mounted) { Navigator.of(context).pop(); }
-                });
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Dispositivo reiniciando. Por favor, vuelva a conectar.'),
-                    duration: Duration(seconds: 4),
-                  ),
-                );
+                _executeSave();
               },
             ),
           ],
@@ -158,18 +154,13 @@ class _ConfigPageState extends State<ConfigPage> {
     );
   }
 
+  // --- FUNCIÓN DE GUARDADO MODIFICADA ---
   void _executeSave() {
-    developer.log("Construyendo JSON de configuración para enviar...", name: "APP.COMMAND");
-    
     Map<String, dynamic> configToSend = {
-      'ip': _controllers['ip']?.text ?? "",
-      'subnet': _controllers['subnet']?.text ?? "",
-      'gateway': _controllers['gateway']?.text ?? "",
-      'wifi_ssid': _controllers['wifi_ssid']?.text ?? "",
-      'wifi_password': _controllers['wifi_password']?.text ?? "",
-      'bt_device_name': _controllers['bt_device_name']?.text ?? "",
-      'bt_enabled': _btEnabled,
-      'serial_enabled': _serialEnabled,
+      'ip': _controllers['ip']?.text ?? "", 'subnet': _controllers['subnet']?.text ?? "",
+      'gateway': _controllers['gateway']?.text ?? "", 'wifi_ssid': _controllers['wifi_ssid']?.text ?? "",
+      'wifi_password': _controllers['wifi_password']?.text ?? "", 'bt_device_name': _controllers['bt_device_name']?.text ?? "",
+      'bt_enabled': _btEnabled, 'serial_enabled': _serialEnabled,
       'serial_baud_rate': int.tryParse(_controllers['serial_baud_rate']?.text ?? '0'),
       'globalPulseTime': int.tryParse(_controllers['globalPulseTime']?.text ?? '0'),
       'inputNames': List.generate(8, (i) => _controllers['inputNames_$i']?.text ?? ""),
@@ -181,15 +172,32 @@ class _ConfigPageState extends State<ConfigPage> {
       'serial_cmd_pulse': _controllers['serial_cmd_pulse']?.text,
       'serial_cmd_help': _controllers['serial_cmd_help']?.text,
     };
+    
+    // 1. Enviamos solo la configuración y esperamos la confirmación en _startListening
+    _bluetoothService.sendConfig(configToSend);
 
-    String jsonString = jsonEncode(configToSend);
-    _sendCommand('set_config $jsonString');
-    _sendCommand('save_and_reboot');
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Enviando configuración al dispositivo...'),
+        duration: Duration(seconds: 4),
+      ),
+    );
   }
 
+  // ... (el resto del código: _scanWifi, _showWifiNetworksDialog, build, etc. no cambia) ...
   void _scanWifi() {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Buscando redes WiFi...')));
-    _sendCommand('scan_wifi');
+    setState(() { _isScanning = true; });
+    showDialog(
+      context: context, barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        title: Text("Buscando Redes WiFi"),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          CircularProgressIndicator(), SizedBox(height: 20),
+          Text("El dispositivo se desconectará temporalmente. Por favor, espere..."),
+        ]),
+      ),
+    );
+    _bluetoothService.startWifiScan();
   }
 
   void _showWifiNetworksDialog(List<String> networks) {
@@ -200,13 +208,43 @@ class _ConfigPageState extends State<ConfigPage> {
           title: const Text("Redes WiFi Encontradas"),
           content: SizedBox(width: double.maxFinite, child: ListView.builder(shrinkWrap: true, itemCount: networks.length, itemBuilder: (context, index) {
             return ListTile(title: Text(networks[index]), onTap: () {
-              _controllers['wifi_ssid']?.text = networks[index];
+              if (mounted) setState(() { _controllers['wifi_ssid']?.text = networks[index]; });
               Navigator.of(context).pop();
             });
           })),
           actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text("Cancelar"))],
         );
       },
+    );
+  }
+
+  void _testWifiConnection() {
+    FocusScope.of(context).unfocus();
+    final String ssid = _controllers['wifi_ssid']?.text ?? '';
+    final String password = _controllers['wifi_password']?.text ?? '';
+    if (ssid.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('El nombre de la red (SSID) no puede estar vacío.')));
+      return;
+    }
+    showDialog(
+      context: context, barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        title: Text("Probando Conexión WiFi"),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          CircularProgressIndicator(), SizedBox(height: 20), Text("Enviando credenciales..."),
+        ]),
+      ),
+    );
+    final Map<String, String> credentials = {'ssid': ssid, 'pass': password};
+    final String jsonString = jsonEncode(credentials);
+    _sendCommand('test_wifi $jsonString');
+  }
+
+  void _showTestResultSnackbar(Map<String, dynamic> result) {
+    final bool success = result['success'] ?? false;
+    final String message = success ? '¡Éxito! Conexión establecida. IP: ${result['ip']}' : 'Fallo: ${result['reason']}';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: success ? Colors.green : Colors.red, duration: const Duration(seconds: 5)),
     );
   }
 
@@ -263,10 +301,7 @@ class _ConfigPageState extends State<ConfigPage> {
       child: TextFormField(
         controller: _controllers[key],
         keyboardType: keyboardType,
-        decoration: InputDecoration(
-          labelText: label,
-          border: const OutlineInputBorder(),
-        ),
+        decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
       ),
     );
   }
@@ -281,7 +316,11 @@ class _ConfigPageState extends State<ConfigPage> {
       const Divider(height: 40),
       Text("Configuración WiFi", style: Theme.of(context).textTheme.titleLarge),
       const SizedBox(height: 10),
-      Row(children: [ Expanded(child: _buildTextField('wifi_ssid', 'Nombre de Red (SSID)')), const SizedBox(width: 8), IconButton(icon: const Icon(Icons.search), onPressed: _scanWifi, tooltip: 'Buscar Redes')]),
+      Row(children: [ 
+        Expanded(child: _buildTextField('wifi_ssid', 'Nombre de Red (SSID)')), 
+        const SizedBox(width: 8), 
+        IconButton(icon: const Icon(Icons.search), onPressed: _scanWifi, tooltip: 'Buscar Redes')
+      ]),
       Padding(padding: const EdgeInsets.symmetric(vertical: 8.0),
         child: TextFormField(
           controller: _controllers['wifi_password'],
@@ -293,6 +332,13 @@ class _ConfigPageState extends State<ConfigPage> {
             ),
           ),
         ),
+      ),
+      const SizedBox(height: 10),
+      ElevatedButton.icon(
+        icon: const Icon(Icons.wifi_find),
+        label: const Text("Probar Conexión WiFi"),
+        onPressed: _testWifiConnection,
+        style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
       ),
     ]);
   }
@@ -321,10 +367,10 @@ class _ConfigPageState extends State<ConfigPage> {
   
   Widget _buildBluetoothTab() {
     return ListView(padding: const EdgeInsets.all(16), children: [
-        Text("Configuración de Bluetooth", style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 10),
-        SwitchListTile(title: const Text("Habilitar Bluetooth"), value: _btEnabled, onChanged: (bool value) { setState(() { _btEnabled = value; }); }),
-        _buildTextField('bt_device_name', 'Nombre del Dispositivo'),
+      Text("Configuración de Bluetooth", style: Theme.of(context).textTheme.titleLarge),
+      const SizedBox(height: 10),
+      SwitchListTile(title: const Text("Habilitar Bluetooth"), value: _btEnabled, onChanged: (bool value) { setState(() { _btEnabled = value; }); }),
+      _buildTextField('bt_device_name', 'Nombre del Dispositivo'),
     ]);
   }
   
@@ -335,9 +381,7 @@ class _ConfigPageState extends State<ConfigPage> {
       SwitchListTile(
         title: const Text("Habilitar control por puerto serie"),
         value: _serialEnabled,
-        onChanged: (bool value) {
-            setState(() { _serialEnabled = value; });
-        },
+        onChanged: (bool value) { setState(() { _serialEnabled = value; }); },
       ),
       const SizedBox(height: 10),
       _buildTextField('serial_baud_rate', 'Velocidad (Baud Rate)', keyboardType: TextInputType.number),

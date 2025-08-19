@@ -1,25 +1,27 @@
+// lib/control_page.dart
+
 import 'dart:convert';
 import 'dart:async';
 import 'dart:developer' as developer;
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'bluetooth_service.dart'; // <-- IMPORTANTE
 import 'config_page.dart'; 
 
 class ControlPage extends StatefulWidget {
-  final BluetoothConnection connection;
-  const ControlPage({super.key, required this.connection});
+  // Ya no recibe 'connection' en el constructor
+  const ControlPage({super.key});
   @override
   State<ControlPage> createState() => _ControlPageState();
 }
 
 class _ControlPageState extends State<ControlPage> {
+  final BluetoothService _bluetoothService = BluetoothService.instance; // <-- Usar la instancia del servicio
+  late StreamSubscription<String> _dataSubscription;
+  late StreamSubscription<bool> _connectionSubscription;
+
   List<Map<String, dynamic>> inputs = [];
   List<Map<String, dynamic>> outputs = [];
   bool isLoading = true;
-
-  StreamSubscription<Uint8List>? _dataSubscription;
-  String _dataBuffer = '';
   Timer? _pollingTimer;
 
   @override
@@ -27,120 +29,81 @@ class _ControlPageState extends State<ControlPage> {
     super.initState();
     _startListening();
     
-    // --- AÑADIR ESTE BLOQUE DE CÓDIGO ---
-    // Inicia un timer que se ejecuta cada segundo para pedir el estado.
     _pollingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (widget.connection.isConnected) {
+      if (_bluetoothService.isConnected) {
         _getStatus();
-      } else {
-        // Si la conexión se pierde, cancelamos el timer.
-        timer.cancel();
       }
     });
-    // --- FIN DEL BLOQUE AÑADIDO ---
+    
+    // Escuchar cambios en el estado de la conexión
+    _connectionSubscription = _bluetoothService.connectionStatusStream.listen((isConnected) {
+      if (!isConnected && mounted) {
+        developer.log('ControlPage: detectó desconexión. Volviendo atrás.', name: 'APP.NAVIGATION');
+        Navigator.of(context).pop();
+      }
+    });
   }
 
   @override
   void dispose() {
-    _dataSubscription?.cancel();
-    _pollingTimer?.cancel(); // <-- AÑADIR ESTA LÍNEA
+    _dataSubscription.cancel();
+    _connectionSubscription.cancel();
+    _pollingTimer?.cancel();
     super.dispose();
   }
 
   void _startListening() {
-    _dataSubscription = widget.connection.input?.listen(
-      (data) {
-        _dataBuffer += utf8.decode(data, allowMalformed: true);
-        while (_dataBuffer.contains('\n')) {
-          final endIndex = _dataBuffer.indexOf('\n');
-          final message = _dataBuffer.substring(0, endIndex).trim();
-          _dataBuffer = _dataBuffer.substring(endIndex + 1);
-
-          if (message.startsWith('{') && message.endsWith('}')) {
-            try {
-              final jsonData = jsonDecode(message);
-              _updateStatus(jsonData);
-            } catch (e) {
-              developer.log('Error al decodificar JSON: $e', name: 'Bluetooth.JSON', error: 'Datos: $message');
-            }
+    _dataSubscription = _bluetoothService.dataStream.listen((message) {
+      if (message.startsWith('{') && message.endsWith('}')) {
+        try {
+          final jsonData = jsonDecode(message);
+          if (jsonData['type'] == 'status') {
+             _updateStatus(jsonData);
           }
+        } catch (e) {
+          developer.log('Error al decodificar JSON: $e', name: 'Bluetooth.JSON', error: 'Datos: $message');
         }
-      },
-      onDone: () {
-        developer.log('Conexión perdida.', name: 'Bluetooth');
-        if (mounted) Navigator.of(context).pop();
-      },
-      onError: (error) {
-        developer.log('Error en la conexión', name: 'Bluetooth', error: error);
-        if (mounted) Navigator.of(context).pop();
-      },
-    );
+      }
+    });
   }
 
   void _updateStatus(Map<String, dynamic> data) {
-    if (data.containsKey('inputs') && data.containsKey('outputs')) {
-      if (mounted) {
-        setState(() {
-          inputs = List<Map<String, dynamic>>.from(data['inputs']);
-          outputs = List<Map<String, dynamic>>.from(data['outputs']);
-          isLoading = false;
-        });
-      }
+    if (mounted) {
+      setState(() {
+        inputs = List<Map<String, dynamic>>.from(data['inputs']);
+        outputs = List<Map<String, dynamic>>.from(data['outputs']);
+        isLoading = false;
+      });
     }
   }
 
   void _sendCommand(String command) {
-    if (widget.connection.isConnected) {
-      widget.connection.output.add(utf8.encode("<$command>"));
-      widget.connection.output.allSent;
-    }
+    _bluetoothService.sendCommand(command);
   }
   
   void _getStatus() {
      _sendCommand('get_status_json');
   }
 
-     @override
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Panel de Control'),
         actions: [
-          // El botón de refresh manual ha sido eliminado.
-          
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Configuración',
-            // --- INICIO DE LA CORRECCIÓN ---
-            // El método se convierte en 'async' para poder usar 'await'
-            onPressed: () async {
-              developer.log("Pausando la escucha de datos en ControlPage.", name: "APP.NAVIGATION");
-              // Pausamos la escucha de datos antes de navegar a la otra pantalla.
-              _dataSubscription?.pause();
-              
-              // Usamos 'await' para que el código se detenga aquí hasta que
-              // la pantalla de ConfigPage se cierre (cuando el usuario le da a "atrás").
-              await Navigator.of(context).push(
-                MaterialPageRoute(builder: (context) => ConfigPage(
-                  connection: widget.connection,
-                  // Le pasamos la suscripción para que la otra pantalla pueda usarla.
-                  dataSubscription: _dataSubscription,
-                )),
+            onPressed: () {
+              // Navegar es más simple ahora
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (context) => const ConfigPage()),
               );
-
-              // Este código solo se ejecutará CUANDO se haya vuelto de ConfigPage.
-              developer.log("Reanudando la escucha de datos en ControlPage.", name: "APP.NAVIGATION");
-              // Volvemos a configurar el 'onData' para que apunte a la función correcta de esta página.
-              _startListening();
-              // Reanudamos la escucha.
-              _dataSubscription?.resume();
-              // Y pedimos el estado por si algo ha cambiado en la configuración.
-              _getStatus();
             },
-            // --- FIN DE LA CORRECCIÓN ---
           ),
         ],
       ),
+      // El resto del widget build no necesita cambios.
       body: isLoading
           ? const Center(
               child: Column(
@@ -215,24 +178,9 @@ class _ControlPageState extends State<ControlPage> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
-                    _buildActionButton(
-                      label: 'ON',
-                      icon: Icons.power_settings_new,
-                      color: Colors.green,
-                      onPressed: () => _sendCommand('on $outputNum'),
-                    ),
-                    _buildActionButton(
-                      label: 'OFF',
-                      icon: Icons.power_off,
-                      color: Colors.red,
-                      onPressed: () => _sendCommand('off $outputNum'),
-                    ),
-                    _buildActionButton(
-                      label: 'PULSO',
-                      icon: Icons.touch_app,
-                      color: Colors.blueAccent,
-                      onPressed: () => _sendCommand('pulse $outputNum'),
-                    ),
+                    _buildActionButton(label: 'ON', icon: Icons.power_settings_new, color: Colors.green, onPressed: () => _sendCommand('on $outputNum')),
+                    _buildActionButton(label: 'OFF', icon: Icons.power_off, color: Colors.red, onPressed: () => _sendCommand('off $outputNum')),
+                    _buildActionButton(label: 'PULSO', icon: Icons.touch_app, color: Colors.blueAccent, onPressed: () => _sendCommand('pulse $outputNum')),
                   ],
                 ),
               ],
@@ -262,12 +210,7 @@ class _ControlPageState extends State<ControlPage> {
     );
   }
 
-  Widget _buildActionButton({
-    required String label,
-    required IconData icon,
-    required Color color,
-    required VoidCallback onPressed,
-  }) {
+  Widget _buildActionButton({required String label, required IconData icon, required Color color, required VoidCallback onPressed}) {
     return ElevatedButton.icon(
       icon: Icon(icon, size: 20),
       label: Text(label),
@@ -275,9 +218,7 @@ class _ControlPageState extends State<ControlPage> {
       style: ElevatedButton.styleFrom(
         foregroundColor: Colors.white,
         backgroundColor: color,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );
   }

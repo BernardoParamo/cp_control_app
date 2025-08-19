@@ -1,8 +1,10 @@
-import 'dart:async';
+// lib/home_page.dart
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'control_page.dart';
+import 'bluetooth_service.dart'; // <-- IMPORTANTE: Importar el servicio
 import 'dart:developer' as developer;
 
 class HomePage extends StatefulWidget {
@@ -13,6 +15,7 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final FlutterBluetoothSerial _bluetooth = FlutterBluetoothSerial.instance;
+  final BluetoothService _bluetoothService = BluetoothService.instance; // <-- Usar la instancia del servicio
   List<BluetoothDevice> _devicesList = [];
   bool _isLoading = false;
 
@@ -23,40 +26,28 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _getPairedDevices() async {
+    // El resto de esta función está bien, no necesita cambios.
     developer.log('HomePage: Pidiendo permisos...', name: 'APP.BLUETOOTH');
     var bluetoothConnectStatus = await Permission.bluetoothConnect.request();
-    var bluetoothScanStatus = await Permission.bluetoothScan.request(); // Necesario para getBondedDevices
+    var bluetoothScanStatus = await Permission.bluetoothScan.request();
 
     if (bluetoothConnectStatus.isGranted && bluetoothScanStatus.isGranted) {
-      developer.log('HomePage: Permiso concedido. Obteniendo dispositivos vinculados...', name: 'APP.BLUETOOTH');
       if(mounted) setState(() { _isLoading = true; _devicesList = []; });
-
       try {
         List<BluetoothDevice> pairedDevices = await _bluetooth.getBondedDevices();
         if(mounted) setState(() { _devicesList = pairedDevices; });
-        developer.log('HomePage: Encontrados ${_devicesList.length} dispositivos vinculados.', name: 'APP.BLUETOOTH');
       } catch (e) {
-        developer.log('HomePage: Error al obtener dispositivos.', name: 'APP.ERROR', error: e.toString());
+        developer.log('Error al obtener dispositivos', name: 'APP.ERROR', error: e);
       } finally {
         if(mounted) setState(() { _isLoading = false; });
       }
-
     } else {
-      developer.log('HomePage: Permisos de Bluetooth denegados.', name: 'APP.ERROR');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Se necesitan permisos de Bluetooth.'))
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Se necesitan permisos de Bluetooth.')));
     }
   }
-
-  // --- ESTA ES LA FUNCIÓN QUE HEMOS RELLENADO ---
+  
+  // --- FUNCIÓN DE CONEXIÓN MODIFICADA ---
   Future<void> _connectToDevice(BluetoothDevice device) async {
-    developer.log('HomePage: Intentando conectar a ${device.name}...', name: 'APP.BLUETOOTH');
-    if (!mounted) return;
-
-    // Muestra un diálogo de "Conectando..."
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -65,38 +56,30 @@ class _HomePageState extends State<HomePage> {
         content: Row(children: [CircularProgressIndicator(), SizedBox(width: 20), Text("Por favor, espere."),],),
       ),
     );
+    
+    // Delegamos la conexión al servicio
+    await _bluetoothService.connect(device);
 
-    try {
-      // Intenta establecer la conexión
-      BluetoothConnection connection = await BluetoothConnection.toAddress(device.address);
-      developer.log('HomePage: ¡CONECTADO con éxito!', name: 'APP.BLUETOOTH');
-      
-      if (mounted) {
-        Navigator.of(context).pop(); // Cierra el diálogo de "Conectando..."
-        developer.log('HomePage: Navegando a ControlPage...', name: 'APP.NAVIGATION');
-        
-        // Navega a la pantalla de control, pasándole la conexión activa
+    if (mounted) Navigator.of(context).pop(); // Cierra el diálogo
+
+    if (_bluetoothService.isConnected) {
+      // Si la conexión fue exitosa, navegamos a la página de control
+      if(mounted) {
         await Navigator.of(context).push(
-          MaterialPageRoute(builder: (context) => ControlPage(connection: connection)),
+          MaterialPageRoute(builder: (context) => const ControlPage()),
         );
-        
-        // Cuando se vuelve de ControlPage (ej. al desconectar), refrescamos la lista
-        developer.log('HomePage: Vuelto de ControlPage. Refrescando lista.', name: 'APP.NAVIGATION');
+        // Cuando se vuelva, refrescamos la lista
         _getPairedDevices();
       }
-
-    } catch (e) {
-      developer.log('HomePage: Fallo al conectar.', name: 'APP.ERROR', error: e.toString());
-      if (mounted) Navigator.of(context).pop(); // Cierra el diálogo de error
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al conectar: ${e.toString()}')));
-      }
+    } else {
+      // Si falló, mostramos un error
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error al conectar con el dispositivo')));
     }
   }
-  // --- FIN DE LA FUNCIÓN RELLENADA ---
 
   @override
   Widget build(BuildContext context) {
+    // El widget build no necesita cambios.
     return Scaffold(
       appBar: AppBar(
         title: const Text('Seleccionar Dispositivo'),
